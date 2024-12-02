@@ -20,6 +20,15 @@ type S3WAL struct {
 	length     uint64
 }
 
+func NewS3WAL(client *s3.Client, bucketName, prefix string) *S3WAL {
+	return &S3WAL{
+		client:     client,
+		bucketName: bucketName,
+		prefix:     prefix,
+		length:     0,
+	}
+}
+
 func (w *S3WAL) getObjectKey(offset uint64) string {
 	return w.prefix + "/" + fmt.Sprintf("%020d", offset)
 }
