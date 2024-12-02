@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"io"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -14,11 +15,23 @@ import (
 type S3WAL struct {
 	client     *s3.Client
 	bucketName string
+	prefix     string
 	length     uint64
+}
+
+func (w *S3WAL) getObjectKey(offset uint64) string {
+	return w.prefix + "/" + fmt.Sprintf("%020d", offset)
 }
 
 func calculateChecksum(buf *bytes.Buffer) [32]byte {
 	return sha256.Sum256(buf.Bytes())
+}
+
+func validataChecksum(data []byte) bool {
+	var storedChecksum [32]byte
+	copy(storedChecksum[:], data[len(data)-32:])
+	recordData := data[:len(data)-32]
+	return storedChecksum == calculateChecksum(bytes.NewBuffer(recordData))
 }
 
 func prepareBody(offset uint64, data []byte) ([]byte, error) {
@@ -29,6 +42,17 @@ func prepareBody(offset uint64, data []byte) ([]byte, error) {
 	checksum := calculateChecksum(buf)
 	_, err := buf.Write(checksum[:])
 	return buf.Bytes(), err
+}
+
+func validateOffset(data []byte, offset uint64) (bool, error) {
+	if len(data) < 8 {
+		return false, fmt.Errorf("data too short for offset validation")
+	}
+	var storedOffset uint64
+	if err := binary.Read(bytes.NewReader(data[:8]), binary.BigEndian, &storedOffset); err != nil {
+		return false, fmt.Errorf("failed to read offset: %w", err)
+	}
+	return storedOffset == offset, nil
 }
 
 func (w *S3WAL) append(ctx context.Context, data []byte) (uint64, error) {
@@ -46,4 +70,29 @@ func (w *S3WAL) append(ctx context.Context, data []byte) (uint64, error) {
 	}
 	w.length = nextOffset
 	return nextOffset, nil
+}
+
+func (w *S3WAL) Read(ctx context.Context, offset uint64) (Record, error) {
+	key := w.getObjectKey(offset)
+	input := &s3.GetObjectInput{
+		Bucket: aws.String(w.bucketName),
+		Key:    aws.String(key),
+	}
+	result, _ := w.client.GetObject(ctx, input)
+	defer result.Body.Close()
+
+	data, _ := io.ReadAll(result.Body)
+	if len(data) < 40 {
+		return Record{}, fmt.Errorf("invalid record: data too short")
+	}
+	if ok, err := validateOffset(data, offset); !ok {
+		return Record{}, fmt.Errorf("offset mismatch: %w", err)
+	}
+	if !validataChecksum(data) {
+		return Record{}, fmt.Errorf("checksum mismatch")
+	}
+	return Record{
+		Offset: offset,
+		Data:   data[8 : len(data)-32],
+	}, nil
 }
