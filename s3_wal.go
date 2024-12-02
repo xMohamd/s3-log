@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"strconv"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
@@ -21,6 +22,11 @@ type S3WAL struct {
 
 func (w *S3WAL) getObjectKey(offset uint64) string {
 	return w.prefix + "/" + fmt.Sprintf("%020d", offset)
+}
+
+func (w *S3WAL) getOffsetFromKey(key string) (uint64, error) {
+	numStr := key[len(w.prefix)+1:]
+	return strconv.ParseUint(numStr, 10, 64)
 }
 
 func calculateChecksum(buf *bytes.Buffer) [32]byte {
@@ -95,4 +101,28 @@ func (w *S3WAL) Read(ctx context.Context, offset uint64) (Record, error) {
 		Offset: offset,
 		Data:   data[8 : len(data)-32],
 	}, nil
+}
+
+func (w *S3WAL) LastRecord(ctx context.Context) (Record, error) {
+	input := &s3.ListObjectsV2Input{
+		Bucket: aws.String(w.bucketName),
+	}
+	paginator := s3.NewListObjectsV2Paginator(w.client, input)
+
+	var maxOffset uint64 = 0
+	for paginator.HasMorePages() {
+		output, _ := paginator.NextPage(ctx)
+		for _, obj := range output.Contents {
+			key := *obj.Key
+			offset, _ := w.getOffsetFromKey(key)
+			if offset > maxOffset {
+				maxOffset = offset
+			}
+		}
+	}
+	if maxOffset == 0 {
+		return Record{}, fmt.Errorf("WAL is empty")
+	}
+	w.length = maxOffset
+	return w.Read(ctx, maxOffset)
 }
