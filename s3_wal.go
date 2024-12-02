@@ -3,6 +3,8 @@ package s3log
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -13,6 +15,20 @@ type S3WAL struct {
 	client     *s3.Client
 	bucketName string
 	length     uint64
+}
+
+func calculateChecksum(buf *bytes.Buffer) [32]byte {
+	return sha256.Sum256(buf.Bytes())
+}
+
+func prepareBody(offset uint64, data []byte) ([]byte, error) {
+	bufferLen := 8 + len(data) + 32
+	buf := bytes.NewBuffer(make([]byte, 0, bufferLen))
+	binary.Write(buf, binary.BigEndian, offset)
+	buf.Write(data)
+	checksum := calculateChecksum(buf)
+	_, err := buf.Write(checksum[:])
+	return buf.Bytes(), err
 }
 
 func (w *S3WAL) append(ctx context.Context, data []byte) (uint64, error) {
